@@ -4,6 +4,14 @@ A **Firecracker microVM–based honeypot** where a minimal guest presents a fake
 
 All application code and automation live under **`honeypot-project/`**.
 
+### Why it stands out (30 seconds)
+
+- **Isolation-first deception**: a real microVM guest with **no guest network** in the default Firecracker layout—interaction is driven through **vsock** to your host.
+- **Dynamic, local-only synthesis**: each command is answered by **Ollama on localhost**—no cloud LLM dependency for the demo path.
+- **Operator-grade visibility**: structured **JSONL telemetry** plus a **Streamlit SOC console** with sessions, latency, tags, and CSV export.
+
+**Docs index:** [Architecture](docs/ARCHITECTURE.md) · [Security](docs/SECURITY.md) · [Demo checklist](docs/DEMO_CHECKLIST.md) · [Known issues](docs/KNOWN_ISSUES.md) · [Demo script](docs/DEMO_SCRIPT.md) · [One-pager pitch](docs/PITCH_ONEPAGER.md) · [Evidence appendix](docs/EVIDENCE_APPENDIX.md)
+
 ---
 
 ## What this project does
@@ -65,7 +73,19 @@ honeypot-project/
 - **Root (once)**: `02_build_rootfs.sh` uses loop mounts and `mkfs.ext4` — run with `sudo`.
 - **Build tools**: `g++`, `make`, `curl`, standard utilities (see script checks in `02_build_rootfs.sh`).
 - **Python**: `python3` plus packages from `host-interceptor/requirements.txt`.
-- **Ollama**: Running locally so `http://localhost:11434/api/chat` works **from the same environment** that runs `interceptor.py` (e.g. `ollama serve`). Default model in code: **`llama3.2`** — pull it first (`ollama pull llama3.2`) or change `OLLAMA_MODEL` in `interceptor.py`.
+- **Ollama**: Running locally so `http://localhost:11434/api/chat` works **from the same environment** that runs `interceptor.py` (e.g. `ollama serve`). Default model in code: **`llama3.2`** — pull it first (`ollama pull llama3.2`) or set **`OLLAMA_MODEL`** (see [`.env.example`](.env.example)).
+
+---
+
+## Preflight (recommended)
+
+From the **repository root**:
+
+```bash
+./scripts/demo/preflight.sh
+```
+
+This checks `/dev/kvm`, Firecracker artifacts, rootfs, and Ollama reachability. `honeypot-project/test_run.sh` runs it automatically unless you set **`SKIP_PREFLIGHT=1`**.
 
 ---
 
@@ -100,6 +120,10 @@ From **`honeypot-project/`**:
    - Starts **`interceptor.py`** with `HONEYPOT_VSOCK_UDS=/tmp/honeypot-fc-vsock`.
    - Runs **`infra/03_run_vm.sh`** to boot Firecracker.
    - Waits on the interceptor; **Ctrl+C** tears down Streamlit, interceptor, and Firecracker (via `infra/run/firecracker.pid`).
+
+For Windows teammates, use the dedicated WSL runbook: [docs/WINDOWS_WSL_TESTING.md](docs/WINDOWS_WSL_TESTING.md).
+
+The Streamlit app supports **Sample (offline demo)** in the sidebar using [docs/sample_telemetry.jsonl](docs/sample_telemetry.jsonl) when no live VM is available.
 
 ---
 
@@ -159,13 +183,20 @@ Must stay aligned between **`guest-agent/agent.cpp`** and **`host-interceptor/in
 
 ## Telemetry schema
 
-Each intercepted command appends one line to **`logs/telemetry.json`**:
+Each intercepted command appends one line to **`logs/telemetry.json`** (override with **`HONEYPOT_TELEMETRY_PATH`**):
 
 | Field | Meaning |
 |--------|---------|
 | `timestamp` | ISO-8601 UTC when the command was processed |
+| `session_id` | UUID for one guest TCP/vsock session |
+| `command_index` | 1-based counter within the session |
+| `latency_ms` | Round-trip time for the Ollama call (milliseconds) |
+| `status` | `ok` or `degraded` (model call failed but guest still got a host message) |
+| `error_type` | Optional: `ollama_http`, `ollama_unreachable`, `ollama_parse`, etc. |
 | `attacker_command` | Raw line from the guest (treat as untrusted) |
 | `llm_response` | Text returned to the guest |
+
+Older rows may omit new fields; the dashboard treats missing `session_id` as `legacy`.
 
 The dashboard is **read-only**; only the interceptor writes this file.
 
@@ -176,8 +207,9 @@ The dashboard is **read-only**; only the interceptor writes this file.
 | Item | Location / notes |
 |------|-------------------|
 | Vsock port **1234** | Hardcoded in `agent.cpp` (`kVsockPort`) and `interceptor.py` (`VSOCK_PORT`) — change in both if you need another port. |
-| Ollama URL / model | `interceptor.py`: `OLLAMA_URL`, `OLLAMA_MODEL` (default `llama3.2`). |
-| Firecracker vsock UDS | `HONEYPOT_VSOCK_UDS` env var; must match `uds_path` in `03_run_vm.sh` (without `_PORT` suffix). |
+| Ollama URL / model | Environment **`OLLAMA_URL`**, **`OLLAMA_MODEL`** (defaults in `interceptor.py`; see [`.env.example`](.env.example)). |
+| Firecracker vsock UDS | **`HONEYPOT_VSOCK_UDS`** env var; must match `uds_path` in `03_run_vm.sh` (without `_PORT` suffix). |
+| Telemetry path | Optional **`HONEYPOT_TELEMETRY_PATH`** overrides `honeypot-project/logs/telemetry.json`. |
 | Machine / memory | `03_run_vm.sh`: `machine-config` (1 vCPU, 128 MiB in the script). |
 
 ---
@@ -205,7 +237,7 @@ The dashboard is **read-only**; only the interceptor writes this file.
 
 ## License
 
-Add a `LICENSE` file if you intend open-source distribution; this README does not specify one.
+Distributed under the **MIT License** — see [LICENSE](LICENSE).
 
 ---
 

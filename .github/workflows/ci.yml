@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - windows_testing
+
+jobs:
+  hygiene-and-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r honeypot-project/host-interceptor/requirements.txt
+
+      - name: Repository hygiene checks
+        run: ./scripts/ci/check_repo_hygiene.sh
+
+      - name: Python syntax smoke test
+        run: |
+          python -m py_compile honeypot-project/host-interceptor/interceptor.py
+          python -m py_compile honeypot-project/analytics/dashboard.py
+
+      - name: C++ guest-agent build smoke test
+        run: make -C honeypot-project/guest-agent clean all
+
+      - name: Shell script syntax smoke test
+        run: |
+          bash -n scripts/demo/preflight.sh
+          bash -n honeypot-project/infra/01_setup_firecracker.sh
+          bash -n honeypot-project/infra/02_build_rootfs.sh
+          bash -n honeypot-project/infra/03_run_vm.sh
+          bash -n honeypot-project/test_run.sh
