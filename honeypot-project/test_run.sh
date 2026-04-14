@@ -23,6 +23,7 @@ set -euo pipefail
 # --- Resolve project root (directory of this script) -------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # PIDs captured after background starts (empty until spawned).
 STREAMLIT_PID=""
@@ -77,11 +78,26 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 # =============================================================================
+# Step 0 — Preflight (skip with SKIP_PREFLIGHT=1)
+# =============================================================================
+if [[ "${SKIP_PREFLIGHT:-0}" != "1" ]]; then
+  if [[ -x "${REPO_ROOT}/scripts/demo/preflight.sh" ]]; then
+    echo "[test_run] Running environment preflight..."
+    "${REPO_ROOT}/scripts/demo/preflight.sh"
+  else
+    echo "[test_run] WARN: preflight script missing at ${REPO_ROOT}/scripts/demo/preflight.sh" >&2
+  fi
+else
+  echo "[test_run] SKIP_PREFLIGHT=1 — skipping environment checks."
+fi
+
+# =============================================================================
 # Step 1 — Ollama must be reachable from this environment
 # =============================================================================
+OLLAMA_HINT="${OLLAMA_URL:-http://localhost:11434/api/chat}"
 echo "========================================================================"
 echo "[test_run] WARNING: Ollama MUST be running before you continue."
-echo "[test_run]   The interceptor calls http://localhost:11434/api/chat"
+echo "[test_run]   The interceptor calls ${OLLAMA_HINT} (override with OLLAMA_URL)."
 echo "[test_run]   Start it on Windows or in WSL (e.g. 'ollama serve') so that"
 echo "[test_run]   URL resolves from this Ubuntu session."
 echo "========================================================================"

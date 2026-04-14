@@ -13,6 +13,12 @@ Architecture:
     (no cloud LLMs) to synthesize plausible vulnerable-Ubuntu shell output.
   - Returns that text to the guest and appends structured JSON telemetry.
 
+Environment (optional):
+  - OLLAMA_URL: default http://localhost:11434/api/chat
+  - OLLAMA_MODEL: default llama3.2
+  - HONEYPOT_TELEMETRY_PATH: override JSONL output path
+  - HONEYPOT_VSOCK_UDS: Firecracker vsock UDS base (see module doc above)
+
 Wire protocol (must match guest-agent/agent.cpp):
   Guest -> Host : one line per command, terminated by '\\n' (UTF-8).
   Host -> Guest : 4-byte big-endian uint32 length + UTF-8 payload (may contain
@@ -28,6 +34,7 @@ import socket
 import struct
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final
@@ -37,8 +44,10 @@ import requests
 # --- Configuration -------------------------------------------------------------
 
 VSOCK_PORT: Final[int] = 1234
-OLLAMA_URL: Final[str] = "http://localhost:11434/api/chat"
-OLLAMA_MODEL: Final[str] = "llama3.2"
+OLLAMA_URL: str = os.environ.get(
+    "OLLAMA_URL", "http://localhost:11434/api/chat"
+).strip()
+OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "llama3.2").strip()
 MAX_LINE_BYTES: Final[int] = 64 * 1024
 MAX_RESPONSE_BYTES: Final[int] = 512 * 1024
 OLLAMA_TIMEOUT_SEC: Final[tuple[float, float]] = (5.0, 120.0)  # (connect, read)
@@ -47,9 +56,8 @@ OLLAMA_TIMEOUT_SEC: Final[tuple[float, float]] = (5.0, 120.0)  # (connect, read)
 # to the host CID. Export HONEYPOT_VSOCK_UDS=/tmp/honeypot-fc-vsock (example).
 _FIRECRACKER_UDS_BASE = os.environ.get("HONEYPOT_VSOCK_UDS", "").strip()
 
-# Telemetry file: project layout places logs at ../logs relative to this script.
+# Telemetry file: default ../logs/telemetry.json relative to this script.
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_TELEMETRY_PATH = _SCRIPT_DIR.parent / "logs" / "telemetry.json"
 
 
 # --- Logging -----------------------------------------------------------------
@@ -62,7 +70,10 @@ log = logging.getLogger("honeypot-interceptor")
 
 
 def _telemetry_path() -> Path:
-    return _TELEMETRY_PATH
+    override = os.environ.get("HONEYPOT_TELEMETRY_PATH", "").strip()
+    if override:
+        return Path(override)
+    return _SCRIPT_DIR.parent / "logs" / "telemetry.json"
 
 
 def append_telemetry(record: dict[str, Any]) -> None:
@@ -167,8 +178,10 @@ def send_framed_response(sock: socket.socket, text: str) -> None:
 
 
 def handle_client(conn: socket.socket, peer: Any) -> None:
-    log.info("guest connected: %r", peer)
+    session_id = str(uuid.uuid4())
+    log.info("guest connected: %r session_id=%s", peer, session_id)
     pending = bytearray()
+    command_index = 0
     try:
         while True:
             line_b = read_next_command_line(conn, pending)
@@ -177,28 +190,48 @@ def handle_client(conn: socket.socket, peer: Any) -> None:
                 break
 
             attacker_command = line_b.decode("utf-8", errors="replace")
+            command_index += 1
             ts = datetime.now(timezone.utc).isoformat()
 
+            status = "ok"
+            error_type: str | None = None
+            t0 = time.perf_counter()
             try:
                 llm_response = query_ollama(attacker_command)
             except requests.HTTPError as e:
                 log.error("Ollama HTTP error: %s", e)
+                status = "degraded"
+                error_type = "ollama_http"
                 llm_response = (
-                    f"[honeypot-host] Ollama HTTP error: {e.response.status_code}\n"
+                    f"[honeypot-host] Ollama HTTP error: {e.response.status_code}. "
+                    "Check `ollama serve` and model availability.\n"
                 )
             except requests.RequestException as e:
                 log.error("Ollama request failed: %s", e)
+                status = "degraded"
+                error_type = "ollama_unreachable"
                 llm_response = (
-                    "[honeypot-host] Could not reach local Ollama at "
-                    f"{OLLAMA_URL!r}. Is `ollama serve` running?\n"
+                    "[honeypot-host] Could not reach Ollama at "
+                    f"{OLLAMA_URL!r}. Start with: ollama serve\n"
                 )
             except (ValueError, KeyError, TypeError) as e:
                 log.error("Ollama parse error: %s", e)
-                llm_response = f"[honeypot-host] Bad response from Ollama: {e}\n"
+                status = "degraded"
+                error_type = "ollama_parse"
+                llm_response = (
+                    f"[honeypot-host] Unexpected Ollama response format: {e}\n"
+                )
+
+            latency_ms = int((time.perf_counter() - t0) * 1000)
 
             append_telemetry(
                 {
                     "timestamp": ts,
+                    "session_id": session_id,
+                    "command_index": command_index,
+                    "latency_ms": latency_ms,
+                    "status": status,
+                    "error_type": error_type,
                     "attacker_command": attacker_command,
                     "llm_response": llm_response,
                 }
@@ -274,6 +307,11 @@ def main() -> None:
     listener: socket.socket | None = None
     uds_listen_path: str | None = None
     try:
+        log.info(
+            "Ollama endpoint model=%s url=%s",
+            OLLAMA_MODEL,
+            OLLAMA_URL,
+        )
         if _FIRECRACKER_UDS_BASE:
             log.info(
                 "starting honeypot host interceptor (Firecracker UDS base=%s, telemetry -> %s)",

@@ -1,0 +1,12 @@
+# OS-local files
+.DS_Store
+Thumbs.db
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Honeypot local/generated artifacts
+honeypot-project/infra/.cache/
+honeypot-project/infra/run/
+honeypot-project/logs/
